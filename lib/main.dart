@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:audio_streamer/audio_streamer.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:permission_handler/permission_handler.dart';
 
@@ -14,27 +15,11 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Flutter Demo',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
         useMaterial3: true,
       ),
@@ -46,15 +31,6 @@ class MyApp extends StatelessWidget {
 class MyHomePage extends StatefulWidget {
   const MyHomePage({super.key, required this.title});
 
-  // This widget is the home page of your application. It is stateful, meaning
-  // that it has a State object (defined below) that contains fields that affect
-  // how it looks.
-
-  // This class is the configuration for the state. It holds the values (in this
-  // case the title) provided by the parent (in this case the App widget) and
-  // used by the build method of the State. Fields in a Widget subclass are
-  // always marked "final".
-
   final String title;
 
   @override
@@ -63,54 +39,76 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   int _counter = 0;
+  MediaStream? _audioStream;
 
-  AudioPlayer _audioPlayer = AudioPlayer();
+  final AudioPlayer _audioPlayer = AudioPlayer();
   StreamSubscription<List<double>>? audioSubscription;
+  Timer? _speakerOverrideTimer;
 
-  void _incrementCounter() {
-    setState(() {
-      // This call to setState tells the Flutter framework that something has
-      // changed in this State, which causes it to rerun the build method below
-      // so that the display can reflect the updated values. If we changed
-      // _counter without calling setState(), then the build method would not be
-      // called again, and so nothing would appear to happen.
-      _counter++;
-    });
+  // Method channel for interacting with native iOS code
+  static const platform = MethodChannel('com.example.myapp/audio');
+
+  Future<void> setAudioSession() async {
+    try {
+      await platform.invokeMethod('setAudioSession');
+      print("Audio session set for playback and recording.");
+    } catch (e) {
+      print("Error setting audio session: $e");
+    }
   }
 
-  void _startAudioStreamer() async {
+  Future<void> startAudioStreaming() async {
+    // Ensure microphone permission is granted
     if (!(await Permission.microphone.isGranted)) {
       await Permission.microphone.request();
     }
 
+    final constraints = <String, dynamic>{
+      'audio': {
+        'echoCancellation': true,
+        'noiseSuppression': true,
+        'autoGainControl': true,
+      },
+      'video': false,
+    };
+
     try {
-      // Start audio streaming
-      AudioStreamer().sampleRate = 21100;
-      audioSubscription = AudioStreamer().audioStream.listen(_onAudioData, onError: _handleError);
+      // Get user media (audio only) with echo cancellation
+      MediaStream stream = await navigator.mediaDevices.getUserMedia(constraints);
+
+      // Save the audio stream for later use
+      setState(() {
+        _audioStream = stream;
+      });
+
+      // Log each track for debugging
+      stream.getAudioTracks().forEach((track) {
+        print("Audio track added: ${track.kind}");
+      });
+
+      print("Audio streaming started with echo cancellation enabled.");
     } catch (e) {
-      print("this is the error from recording stream :$e");
+      print("Error starting audio streaming: $e");
     }
-
-    print("Audio Streamer started.");
   }
 
-  void _onAudioData(List<double> buffer) async {
-    var rms = sqrt(buffer.fold(0.0, (prev, element) => prev + pow(element, 2)) / buffer.length);
-    // print("RMS from microphone: $rms");
-
-    // List<int> intBuffer = buffer.map((e) => (e * 32767).toInt()).toList();
-    // Uint8List byteBuffer = Uint8List.fromList(intBuffer.expand((i) => [i & 0xff, (i >> 8) & 0xff]).toList());
-    // _sendAudioToServer(byteBuffer);
-
-    // Send the audio to the server only when listening is true
-    print("_onAudioData:::, listening.value:: sending");
-    List<int> intBuffer = buffer.map((e) => (e * 32767).toInt()).toList();
-    Uint8List byteBuffer = Uint8List.fromList(intBuffer.expand((i) => [i & 0xff, (i >> 8) & 0xff]).toList());
-    print("_onAudioData:::, listening.value:: $byteBuffer");
+  bool isRecording() {
+    // If the audio stream is not null and contains active audio tracks, it's recording
+    return _audioStream != null &&
+        _audioStream!.getAudioTracks().any(((track) {
+          print("this data is from webRTC : ${track.kind}");
+          print("this data is from webRTC : ${track.enabled}");
+          if (track.kind == 'audio' && track.enabled) {
+            return true;
+          } else {
+            return false;
+          }
+        }));
   }
 
-  void _handleError(Object error) {
-    print("Audio error: $error");
+  void _incrementCounter() {
+    print("is webRTC recording : ${isRecording()}");
+    isRecording();
   }
 
   Future<void> _loadAudio() async {
@@ -121,46 +119,32 @@ class _MyHomePageState extends State<MyHomePage> {
 
   @override
   void initState() {
-    _loadAudio();
-    _startAudioStreamer();
     super.initState();
+
+    // Ensure the audio session is set up for playback and recording
+    setAudioSession();
+
+    // Start the audio streaming setup after permissions are handled
+    Future.delayed(Duration(seconds: 1), () async {
+      await _loadAudio();
+
+      // Add a delay to ensure audio setup completes before streaming starts
+      Future.delayed(Duration(seconds: 2), () async {
+        // setAudioSession();
+        await startAudioStreaming();
+      });
+    });
   }
 
   @override
   Widget build(BuildContext context) {
-    // This method is rerun every time setState is called, for instance as done
-    // by the _incrementCounter method above.
-    //
-    // The Flutter framework has been optimized to make rerunning build methods
-    // fast, so that you can just rebuild anything that needs updating rather
-    // than having to individually change instances of widgets.
     return Scaffold(
       appBar: AppBar(
-        // TRY THIS: Try changing the color here to a specific color (to
-        // Colors.amber, perhaps?) and trigger a hot reload to see the AppBar
-        // change color while the other colors stay the same.
         backgroundColor: Theme.of(context).colorScheme.inversePrimary,
-        // Here we take the value from the MyHomePage object that was created by
-        // the App.build method, and use it to set our appbar title.
         title: Text(widget.title),
       ),
       body: Center(
-        // Center is a layout widget. It takes a single child and positions it
-        // in the middle of the parent.
         child: Column(
-          // Column is also a layout widget. It takes a list of children and
-          // arranges them vertically. By default, it sizes itself to fit its
-          // children horizontally, and tries to be as tall as its parent.
-          //
-          // Column has various properties to control how it sizes itself and
-          // how it positions its children. Here we use mainAxisAlignment to
-          // center the children vertically; the main axis here is the vertical
-          // axis because Columns are vertical (the cross axis would be
-          // horizontal).
-          //
-          // TRY THIS: Invoke "debug painting" (choose the "Toggle Debug Paint"
-          // action in the IDE, or press "p" in the console), to see the
-          // wireframe for each widget.
           mainAxisAlignment: MainAxisAlignment.center,
           children: <Widget>[
             const Text(
@@ -177,7 +161,7 @@ class _MyHomePageState extends State<MyHomePage> {
         onPressed: _incrementCounter,
         tooltip: 'Increment',
         child: const Icon(Icons.add),
-      ), // This trailing comma makes auto-formatting nicer for build methods.
+      ),
     );
   }
 }

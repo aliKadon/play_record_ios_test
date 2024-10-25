@@ -38,6 +38,7 @@ dependencies:
   just_audio: ^0.9.41
   audio_streamer: ^4.0.0
   permission_handler: ^11.3.1
+  flutter_webrtc: ^0.12.1
 
 dev_dependencies:
   flutter_test:
